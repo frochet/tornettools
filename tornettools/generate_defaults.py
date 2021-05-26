@@ -36,7 +36,7 @@ TOR_GUARD_MIN_CONSBW=2000
 DIRAUTH_COUNTRY_CODES=["US", "DE", "NL", "FR", "SE"]
 
 TOR_ARGS_FMT = "--Address {0} --Nickname {0} --DataDirectory "+SHADOW_DATA_PATH+"/"+SHADOW_HOSTS_PATH+"/{0} --GeoIPFile "+SHADOW_INSTALL_PREFIX+"/share/geoip --defaults-torrc "+CONFIG_DIRPATH+"/"+TORRC_COMMON_FILENAME+" -f {1}"
-TOR_ARGS_WITH_PLUGINS_FMT = "--Address {0} --Nickname {0} --DataDirectory "+SHADOW_DATA_PATH+"/"+SHADOW_HOSTS_PATH+"/{0} --PluginsDirectory "+SHADOW_DATA_PATH+"/"+SHADOW_HOST+"/{0}/"+SHADOW_PLUGIN_DIR+" --GeoIPFile "+SHADOW_INSTALL_PREFIX+"/share/geoip --defaults-torrc "+CONFIG_DIRPATH+"/"+TORRC_COMMON_FILENAME+" -f {1}"
+TOR_ARGS_WITH_PLUGINS_FMT = "--Address {0} --Nickname {0} --DataDirectory "+SHADOW_DATA_PATH+"/"+SHADOW_HOSTS_PATH+"/{0} --PluginsDirectory "+SHADOW_DATA_PATH+"/"+SHADOW_HOSTS_PATH+"/{0}/"+SHADOW_PLUGIN_DIR+" --GeoIPFile "+SHADOW_INSTALL_PREFIX+"/share/geoip --defaults-torrc "+CONFIG_DIRPATH+"/"+TORRC_COMMON_FILENAME+" -f {1}"
 
 # this number of data equals 1 MBit
 BW_1MBIT_BYTES = int(round(1000*1000/8))
