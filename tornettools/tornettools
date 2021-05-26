@@ -334,6 +334,18 @@ def main():
         action="store", dest="torgencertexe",
         default=which("tor-gencert"))
 
+    generate_parser.add_argument('--plugins_path,
+        help="""path to plugin directory containing all plugin built""",
+        metavar="PATH", type=__type_str_file_path_in,
+        action="store",
+        default=None)
+
+    generate_parser.add_argument('--plugins',
+        help="""plugin names that would be included in the generated config files""",
+        type=str,
+        action="store",
+        nargs="+")
+
     ############
     # simulate #
     ############

@@ -140,12 +140,12 @@ def generate_tor_config(args, authorities, relays):
 
     __generate_resolv_file(args, abs_conf_path)
     __generate_tor_v3bw_file(args, authorities, relays)
-    __generate_torrc_common(abs_conf_path, authorities)
-    __generate_torrc_authority(abs_conf_path, relays)
-    __generate_torrc_exit(abs_conf_path)
-    __generate_torrc_nonexit(abs_conf_path)
-    __generate_torrc_markovclient(abs_conf_path)
-    __generate_torrc_perfclient(abs_conf_path)
+    __generate_torrc_common(args, abs_conf_path, authorities)
+    __generate_torrc_authority(args, abs_conf_path, relays)
+    __generate_torrc_exit(args, abs_conf_path)
+    __generate_torrc_nonexit(args, abs_conf_path)
+    __generate_torrc_markovclient(args, abs_conf_path)
+    __generate_torrc_perfclient(args, abs_conf_path)
 
 def __generate_resolv_file(args, conf_path):
     with open("{}/{}".format(conf_path, RESOLV_FILENAME), "w") as resolvfile:
@@ -182,7 +182,7 @@ def __generate_tor_v3bw_file(args, authorities, relays):
     v3bw_path = "{}/v3bw".format(bwauth_dir)
     os.symlink("v3bw.init.consensus", v3bw_path)
 
-def __generate_torrc_common(conf_path, authorities):
+def __generate_torrc_common(args, conf_path, authorities):
     auth_names = []
 
     torrc_file = open("{}/{}".format(conf_path, TORRC_COMMON_FILENAME), 'w')
@@ -227,10 +227,12 @@ def __generate_torrc_common(conf_path, authorities):
     torrc_file.write('DoSConnectionEnabled 0\n')
     torrc_file.write('DoSRefuseSingleHopClientRendezvous 0\n')
     torrc_file.write('ControlPort {}\n'.format(TOR_CONTROL_PORT))
+    if args.plugins_path:
+        torrc_file.write('EnablePlugins 1')
 
     torrc_file.close()
 
-def __generate_torrc_authority(conf_path, relays):
+def __generate_torrc_authority(args, conf_path, relays):
     tornet_fps_g = [relays['g'][fp]['tornet_fingerprint'] for fp in relays['g']]
     tornet_fps_e = [relays['e'][fp]['tornet_fingerprint'] for fp in relays['e']]
     tornet_fps_ge = [relays['ge'][fp]['tornet_fingerprint'] for fp in relays['ge']]
@@ -257,7 +259,7 @@ def __generate_torrc_authority(conf_path, relays):
 
     torrc_file.close()
 
-def __generate_torrc_exit(conf_path):
+def __generate_torrc_exit(args, conf_path):
     torrc_file = open("{}/{}".format(conf_path, TORRC_EXITRELAY_FILENAME), 'w')
 
     torrc_file.write('#Log info stdout\n')
@@ -268,7 +270,7 @@ def __generate_torrc_exit(conf_path):
 
     torrc_file.close()
 
-def __generate_torrc_nonexit(conf_path):
+def __generate_torrc_nonexit(args, conf_path):
     torrc_file = open("{}/{}".format(conf_path, TORRC_NONEXITRELAY_FILENAME), 'w')
 
     torrc_file.write('#Log info stdout\n')
@@ -279,7 +281,7 @@ def __generate_torrc_nonexit(conf_path):
 
     torrc_file.close()
 
-def __generate_torrc_markovclient(conf_path):
+def __generate_torrc_markovclient(args, conf_path):
     torrc_file = open("{}/{}".format(conf_path, TORRC_MARKOVCLIENT_FILENAME), 'w')
 
     torrc_file.write('ClientOnly 1\n')
@@ -293,7 +295,7 @@ def __generate_torrc_markovclient(conf_path):
 
     torrc_file.close()
 
-def __generate_torrc_perfclient(conf_path):
+def __generate_torrc_perfclient(args, conf_path):
     torrc_file = open("{}/{}".format(conf_path, TORRC_PERFCLIENT_FILENAME), 'w')
 
     torrc_file.write('ClientOnly 1\n')

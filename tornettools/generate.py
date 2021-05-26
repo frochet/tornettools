@@ -104,6 +104,18 @@ def __generate_shadow_config(args, authorities, relays, tgen_servers, perf_clien
     xml_str = etree.tostring(root, pretty_print=True, xml_declaration=False)
     with open("{}/{}".format(args.prefix, SHADOW_CONFIG_FILENAME), 'wb') as configfile:
         configfile.write(xml_str)
+    # add them to all;
+    if args.plugins_path:
+        for plugin in args.plugins:
+            for (fp, authority) in authorities.items():
+                __add_plugins_to_config(args, host, authority['nickname'], plugin)
+            for pos in ['ge', 'e', 'g', 'm']:
+                for (fp, relay) in relays[pos].items():
+                    __add_plugins_to_relays(args, host, relay['nickname'], plugin)
+            for client in tgen_clients:
+                __add_plugins_to_clients(args, host, client['name'], plugin)
+            for perfclient in perf_clients:
+                __add_plugins_to_clients(args, host, perfclient['name'], plugin)
 
 def __get_scaled_tgen_client_bandwidth_kib(args):
     # 10 Mbit/s per "user" that a tgen client simulates
@@ -165,7 +177,10 @@ def __add_xml_tgen_client(args, root, name, country, torrc, tgenrc):
     process.set("plugin", "tor")
     process.set("preload", "tor-preload")
     process.set("starttime", "{}".format(BOOTSTRAP_LENGTH_SECONDS-60)) # start before boostrapping ends
-    process.set("arguments", TOR_ARGS_FMT.format(name, torrc))
+    if args.plugins_path:
+        process.set("arguments", TOR_ARGS_WITH_PLUGINS_FMT.format(name, torrc))
+    else:
+        process.set("arguments", TOR_ARGS_FMT.format(name, torrc))
 
     oniontrace_start_time = BOOTSTRAP_LENGTH_SECONDS-60+1
     __add_xml_oniontrace(args, host, oniontrace_start_time, name)
@@ -208,8 +223,10 @@ def __add_xml_tor_relay(args, root, relay, orig_fp, is_authority=False):
     else:
         starttime = 5
         torrc = "{}/{}".format(CONFIG_DIRPATH, TORRC_NONEXITRELAY_FILENAME)
-
-    tor_args = TOR_ARGS_FMT.format(relay['nickname'], torrc)
+    if args.plugins_path:
+        tor_args = TOR_ARGS_WITH_PLUGINS_FMT.format(relay['nickname'], torrc)
+    else:
+        tor_args = TOR_ARGS_FMT.format(relay['nickname'], torrc)
     if not is_authority:
         # Tor enforces a min rate for relays
         rate = max(BW_RATE_MIN, relay['bandwidth_rate'])
@@ -241,3 +258,14 @@ def __add_xml_oniontrace(args, parent_elm, start_time, name):
         run_time = SIMULATION_LENGTH_SECONDS-start_time-1
         tracefile_path = "{}/{}/{}/oniontrace.csv".format(SHADOW_DATA_PATH, SHADOW_HOSTS_PATH, name)
         process.set("arguments", "Mode=record TorControlPort={} LogLevel=info RunTime={} TraceFile={}".format(TOR_CONTROL_PORT, run_time, tracefile_path))
+
+def __add_plugins_to_config(args, host, name, plugin):
+    hosts_prefix = "{}/{}/{}".format(args.prefix, SHADOW_TEMPLATE_PATH, SHADOW_HOSTS_PATH)
+    elem_path = "{}/{}".format(host_prefix, name)
+    if not os.path.exists("{}/plugins".format(elem_path)):
+        os.makedirs("{}/plugins".format(elem_path))
+    for x in os.listdirs(args.plugins_path):
+        if x in args.plugins:
+            shutil.copytree(args.plugins_path+"/"+x, elem_path+'/plugins/'+x,
+                            ignore=shutil.ignore_patterns('*.c', '*.h', 'Makefile'))
+
