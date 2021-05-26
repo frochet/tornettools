@@ -261,7 +261,7 @@ def __add_xml_oniontrace(args, parent_elm, start_time, name):
 
 def __add_plugins_to_config(args, name, plugin):
     hosts_prefix = "{}/{}/{}".format(args.prefix, SHADOW_TEMPLATE_PATH, SHADOW_HOSTS_PATH)
-    elem_path = "{}/{}".format(host_prefix, name)
+    elem_path = "{}/{}".format(hosts_prefix, name)
     if not os.path.exists("{}/plugins".format(elem_path)):
         os.makedirs("{}/plugins".format(elem_path))
     for x in os.listdirs(args.plugins_path):
