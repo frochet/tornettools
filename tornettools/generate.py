@@ -1,4 +1,5 @@
 import sys
+import shutil
 import os
 import json
 import logging
@@ -111,11 +112,11 @@ def __generate_shadow_config(args, authorities, relays, tgen_servers, perf_clien
                 __add_plugins_to_config(args, authority['nickname'], plugin)
             for pos in ['ge', 'e', 'g', 'm']:
                 for (fp, relay) in relays[pos].items():
-                    __add_plugins_to_relays(args, relay['nickname'], plugin)
+                    __add_plugins_to_config(args, relay['nickname'], plugin)
             for client in tgen_clients:
-                __add_plugins_to_clients(args, client['name'], plugin)
+                __add_plugins_to_config(args, client['name'], plugin)
             for perfclient in perf_clients:
-                __add_plugins_to_clients(args, perfclient['name'], plugin)
+                __add_plugins_to_config(args, perfclient['name'], plugin)
 
 def __get_scaled_tgen_client_bandwidth_kib(args):
     # 10 Mbit/s per "user" that a tgen client simulates
@@ -264,7 +265,7 @@ def __add_plugins_to_config(args, name, plugin):
     elem_path = "{}/{}".format(hosts_prefix, name)
     if not os.path.exists("{}/plugins".format(elem_path)):
         os.makedirs("{}/plugins".format(elem_path))
-    for x in os.listdirs(args.plugins_path):
+    for x in os.listdir(args.plugins_path):
         if x in args.plugins:
             shutil.copytree(args.plugins_path+"/"+x, elem_path+'/plugins/'+x,
                             ignore=shutil.ignore_patterns('*.c', '*.h', 'Makefile'))
