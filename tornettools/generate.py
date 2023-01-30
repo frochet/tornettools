@@ -107,16 +107,15 @@ def __generate_shadow_config(args, authorities, relays, tgen_servers, perf_clien
         configfile.write(xml_str)
     # add them to all;
     if args.plugins_path:
-        for plugin in args.plugins:
-            for (fp, authority) in authorities.items():
-                __add_plugins_to_config(args, authority['nickname'], plugin)
-            for pos in ['ge', 'e', 'g', 'm']:
-                for (fp, relay) in relays[pos].items():
-                    __add_plugins_to_config(args, relay['nickname'], plugin)
-            for client in tgen_clients:
-                __add_plugins_to_config(args, client['name'], plugin)
-            for perfclient in perf_clients:
-                __add_plugins_to_config(args, perfclient['name'], plugin)
+        for (fp, authority) in authorities.items():
+            __add_plugins_to_config(args, authority['nickname'])
+        for pos in ['ge', 'e', 'g', 'm']:
+            for (fp, relay) in relays[pos].items():
+                __add_plugins_to_config(args, relay['nickname'])
+        for client in tgen_clients:
+            __add_plugins_to_config(args, client['name'])
+        for perfclient in perf_clients:
+            __add_plugins_to_config(args, perfclient['name'])
 
 def __get_scaled_tgen_client_bandwidth_kib(args):
     # 10 Mbit/s per "user" that a tgen client simulates
@@ -260,7 +259,7 @@ def __add_xml_oniontrace(args, parent_elm, start_time, name):
         tracefile_path = "{}/{}/{}/oniontrace.csv".format(SHADOW_DATA_PATH, SHADOW_HOSTS_PATH, name)
         process.set("arguments", "Mode=record TorControlPort={} LogLevel=info RunTime={} TraceFile={}".format(TOR_CONTROL_PORT, run_time, tracefile_path))
 
-def __add_plugins_to_config(args, name, plugin):
+def __add_plugins_to_config(args, name):
     hosts_prefix = "{}/{}/{}".format(args.prefix, SHADOW_TEMPLATE_PATH, SHADOW_HOSTS_PATH)
     elem_path = "{}/{}".format(hosts_prefix, name)
     if not os.path.exists("{}/plugins".format(elem_path)):
