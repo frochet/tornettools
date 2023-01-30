@@ -1,28 +1,59 @@
 import sys
 import shutil
 import os
-import json
+import yaml
 import logging
-import shlex
+import shutil
+import random
+from ipaddress import IPv4Address
+import base64
 
-from lxml import etree
+import networkx as nx
 
-from tornettools.generate_defaults import *
-from tornettools.generate_tgen import *
-from tornettools.generate_tor import *
-from tornettools.util import copy_and_extract_file
+from tornettools.generate_tgen import generate_tgen_config, get_clients, get_servers
+from tornettools.generate_defaults import (BOOTSTRAP_LENGTH_SECONDS, BW_1GBIT_KBIT, BW_1MBIT_KBIT,
+                                           BW_RATE_MIN, CONFIG_DIRNAME, SHADOW_CONFIG_FILENAME,
+                                           SHADOW_HOSTS_PATH, SHADOW_INSTALL_PREFIX,
+                                           SHADOW_TEMPLATE_PATH, SIMULATION_LENGTH_SECONDS,
+                                           TGENRC_MARKOVCLIENT_FILENAME, TGENRC_PERFCLIENT_EXIT_FILENAME,
+                                           TGENRC_PERFCLIENT_HS_FILENAME, TGENRC_SERVER_FILENAME,
+                                           TGEN_ONIONSERVICE_PORT, TGEN_SERVER_PORT,
+                                           TMODEL_TOPOLOGY_FILENAME, TORRC_CLIENT_FILENAME,
+                                           TORRC_CLIENT_MARKOV_FILENAME, TORRC_CLIENT_PERF_FILENAME,
+                                           TORRC_DEFAULTS_HOST_FILENAME, TORRC_HOST_FILENAME,
+                                           TORRC_ONIONSERVICE_FILENAME, TORRC_RELAY_AUTHORITY_FILENAME,
+                                           TORRC_RELAY_EXITGUARD_FILENAME, TORRC_RELAY_EXITONLY_FILENAME,
+                                           TORRC_RELAY_FILENAME, TORRC_RELAY_GUARDONLY_FILENAME,
+                                           TORRC_RELAY_OTHER_FILENAME, TOR_CONTROL_PORT,
+                                           TOR_ONIONSERVICE_DIR, get_host_rel_conf_path)
+from tornettools.generate_tor import generate_tor_config, generate_tor_keys, get_relays
 
 def run(args):
-    if args.torexe == None:
+    if args.torexe is None:
         logging.critical("Unable to find a 'tor' executable in PATH, but we need it to generate keys. Did you build 'tor'? Did you set your PATH or provide the path to the 'tor' executable?")
         logging.critical("Refusing to generate a network without 'tor'.")
         return
-    if args.torgencertexe == None:
+    if args.torgencertexe is None:
         logging.critical("Unable to find a 'tor-gencert' executable in PATH, but we need it to generate keys. Did you build 'tor-gencert'? Did you set your PATH or provide the path to the 'tor-gencert' executable?")
         logging.critical("Refusing to generate a network without 'tor-gencert'.")
         return
 
     logging.info(f"Generating network using tor and tor-gencert at {args.torexe} and {args.torgencertexe}")
+
+    os.mkdir("{}/{}".format(args.prefix, CONFIG_DIRNAME))
+
+    # only copy the compressed atlas file if the user did not give us a custom path
+    if args.atlas_path is None:
+        logging.info("Copying atlas topology file (use the '-a/--atlas' option to disable)")
+        topology_src_path = "{}/data/shadow/network/{}.xz".format(args.tmodel_git_path, TMODEL_TOPOLOGY_FILENAME)
+        topology_dst_path = "{}/{}/{}.xz".format(args.prefix, CONFIG_DIRNAME, TMODEL_TOPOLOGY_FILENAME)
+        shutil.copy2(topology_src_path, topology_dst_path)
+        args.atlas_path = topology_dst_path
+
+    # read the staged network info graph, which contains all of the atlas graph nodes
+    logging.info(f"Reading staged network info {args.network_info_path}")
+    network = nx.readwrite.gml.read_gml(args.network_info_path, label='id')
+    logging.info("Finished reading staged network info")
 
     # get the set of relays we will create in shadow
     logging.info("Sampling Tor relays now")
@@ -32,79 +63,116 @@ def run(args):
     logging.info("Generating Tor key material now, this may take awhile...")
     authorities, relays = generate_tor_keys(args, relays)
 
-    logging.info("Generating Tor configuration files")
-    generate_tor_config(args, authorities, relays)
-
+    # each client and server operates as either an onion-service client/server, or
+    # a non-onion-service (exit) client/server (never both)
     logging.info("Generating Clients")
     tgen_clients, perf_clients = get_clients(args)
 
     logging.info("Generating Servers")
-    tgen_servers = get_servers(args, len(tgen_clients))
+    tgen_servers = get_servers(args, tgen_clients)
+
+    # onion-service clients should only connect to onion-service servers, and non-onion-service clients should only
+    # connect to non-onion-service servers
+    exit_peers = ["{}:{}".format(server['name'], TGEN_SERVER_PORT) for server in tgen_servers if not server['is_hs_server']]
+    hs_peers = ["{}:{}".format(server['hs_hostname'], TGEN_ONIONSERVICE_PORT) for server in tgen_servers if server['is_hs_server']]
+
+    # perf-clients do not have host-specific tgen configs, so we can't set individual peer lists
+    for client in tgen_clients:
+        client['peers'] = exit_peers if not client['is_hs_client'] else hs_peers
+
+    # a map from hostnames to the host's torrc-defaults
+    host_torrc_defaults = {}
+    host_torrc_defaults.update({x['nickname']: {'includes': [TORRC_RELAY_FILENAME, TORRC_RELAY_AUTHORITY_FILENAME]} for x in authorities.values()})
+    host_torrc_defaults.update({x['nickname']: __relay_host_torrc_defaults(x) for y in relays.values() for x in y.values()})
+    host_torrc_defaults.update({x['name']: {'includes': [TORRC_CLIENT_FILENAME, TORRC_CLIENT_PERF_FILENAME]} for x in perf_clients})
+    host_torrc_defaults.update({x['name']: {'includes': [TORRC_CLIENT_FILENAME, TORRC_CLIENT_MARKOV_FILENAME]} for x in tgen_clients})
+    host_torrc_defaults.update({x['name']: {'includes': [TORRC_ONIONSERVICE_FILENAME]} for x in tgen_servers if x['is_hs_server']})
+
+    logging.info("Generating Tor configuration files")
+    generate_tor_config(args, authorities, relays, host_torrc_defaults)
 
     logging.info("Generating TGen configuration files")
-    generate_tgen_config(args, tgen_clients, tgen_servers)
+    generate_tgen_config(args, tgen_clients, exit_peers, hs_peers)
 
-    logging.info("Constructing Shadow config XML file")
-    __generate_shadow_config(args, authorities, relays, tgen_servers, perf_clients, tgen_clients)
+    logging.info("Constructing Shadow config YAML file")
+    __generate_shadow_config(args, network, authorities, relays, tgen_servers, perf_clients, tgen_clients)
 
-    # only copy the atlas file if the user did not tell us where it has the atlas stored
-    if args.atlas_path is None:
-        logging.info("Copying atlas topology file (use the '-a/--atlas' option to disable)")
-        topology_src_path = "{}/data/shadow/network/{}.xz".format(args.tmodel_git_path, TMODEL_TOPOLOGY_FILENAME)
-        topology_dst_path = "{}/{}/{}.xz".format(args.prefix, CONFIG_DIRPATH, TMODEL_TOPOLOGY_FILENAME)
-        copy_and_extract_file(topology_src_path, topology_dst_path)
+def __assign_address(used_addresses, ip_address_hint):
+    offset = 0
+    while True:
+        candidate = ip_address_hint + offset
+        if candidate.is_global and candidate not in used_addresses:
+            break
+        offset += 1
+    used_addresses.add(candidate)
+    return candidate
 
-def __generate_shadow_config(args, authorities, relays, tgen_servers, perf_clients, tgen_clients):
-    # create the XML for the shadow.config.xml file
-    root = etree.Element("shadow")
-    root.set("bootstraptime", "{}".format(BOOTSTRAP_LENGTH_SECONDS)) # disable bandwidth limits and packet loss for first 5 minutes
-    root.set("stoptime", "{}".format(SIMULATION_LENGTH_SECONDS)) # stop after 1 hour of simulated time
-    root.set("preload", "{}/lib/libshadow-interpose.so".format(SHADOW_INSTALL_PREFIX))
-    root.set("environment", "OPENSSL_ia32cap=~0x200000200000000;EVENT_NOSELECT=1;EVENT_NOPOLL=1;EVENT_NOKQUEUE=1;EVENT_NODEVPOLL=1;EVENT_NOEVPORT=1;EVENT_NOWIN32=1")
-
-    topology = etree.SubElement(root, "topology")
-    if args.atlas_path is None:
-        topology.set("path", "{}/{}".format(CONFIG_DIRPATH, TMODEL_TOPOLOGY_FILENAME))
+def __relay_to_torrc_default_include(relay):
+    if "exitguard" in relay['nickname']:
+        return TORRC_RELAY_EXITGUARD_FILENAME
+    elif "exit" in relay['nickname']:
+        return TORRC_RELAY_EXITONLY_FILENAME
+    elif "guard" in relay['nickname']:
+        return TORRC_RELAY_GUARDONLY_FILENAME
     else:
-        topology.set("path", "{}".format(args.atlas_path))
+        return TORRC_RELAY_OTHER_FILENAME
 
-    plugin = etree.SubElement(root, "plugin")
-    plugin.set("id", "tor")
-    plugin.set("path", "{}/lib/libshadow-plugin-tor.so".format(SHADOW_INSTALL_PREFIX))
+def __relay_host_torrc_defaults(relay):
+    includes = [TORRC_RELAY_FILENAME, __relay_to_torrc_default_include(relay)]
 
-    plugin = etree.SubElement(root, "plugin")
-    plugin.set("id", "tor-preload")
-    plugin.set("path", "{}/lib/libshadow-preload-tor.so".format(SHADOW_INSTALL_PREFIX))
+    # only non-authority relays should have bandwidth config options set
+    rate = max(BW_RATE_MIN, relay['bandwidth_rate'])
+    burst = max(BW_RATE_MIN, relay['bandwidth_burst'])
 
-    if args.events_csv is not None or args.do_trace:
-        plugin = etree.SubElement(root, "plugin")
-        plugin.set("id", "oniontrace")
-        plugin.set("path", "{}/bin/oniontrace".format(SHADOW_INSTALL_PREFIX))
+    return {'includes': includes, 'bandwidth_rate': rate, 'bandwidth_burst': burst}
 
-    plugin = etree.SubElement(root, "plugin")
-    plugin.set("id", "tgen")
-    plugin.set("path", "{}/bin/tgen".format(SHADOW_INSTALL_PREFIX))
+def __generate_shadow_config(args, network, authorities, relays, tgen_servers, perf_clients, tgen_clients):
+    # create the YAML for the shadow.config.yaml file
+
+    config = {}
+    config["general"] = {}
+    config["network"] = {}
+    config["hosts"] = {}
+
+    config["general"]["bootstrap_end_time"] = BOOTSTRAP_LENGTH_SECONDS # disable bandwidth limits and packet loss for first 5 minutes
+    config["general"]["stop_time"] = SIMULATION_LENGTH_SECONDS # stop after 1 hour of simulated time
+
+    # supported in Shadow >=2.1
+    config["general"]["progress"] = True
+
+    # for compatability with old tornettools sims, this is also set as a default shadow argument in the cli
+    config["general"]["template_directory"] = "shadow.data.template"
+
+    # the atlas topology is complete, so we can use only direct edges
+    config["network"]["use_shortest_path"] = False
+
+    config["network"]["graph"] = {}
+    config["network"]["graph"]["type"] = "gml"
+    config["network"]["graph"]["file"] = {}
+    config["network"]["graph"]["file"]["path"] = str(args.atlas_path)
+    config["network"]["graph"]["file"]["compression"] = "xz"
+
+    used_addresses = set()
 
     for (fp, authority) in sorted(authorities.items(), key=lambda kv: kv[1]['nickname']):
-        __add_xml_tor_relay(args, root, authority, fp, is_authority=True)
+        config["hosts"].update(__tor_relay(args, network, used_addresses, authority, fp, is_authority=True))
 
     for pos in ['ge', 'e', 'g', 'm']:
         # use reverse to sort each class from fastest to slowest when assigning the id counter
         for (fp, relay) in sorted(relays[pos].items(), key=lambda kv: kv[1]['weight'], reverse=True):
-            __add_xml_tor_relay(args, root, relay, fp, is_authority=False)
+            config["hosts"].update(__tor_relay(args, network, used_addresses, relay, fp, is_authority=False))
 
     for server in tgen_servers:
-        __add_xml_server(args, root, server)
+        config["hosts"].update(__server(args, network, server))
 
     for client in perf_clients:
-        __add_xml_perfclient(args, root, client)
+        config["hosts"].update(__perfclient(args, network, client))
 
     for client in tgen_clients:
-        __add_xml_markovclient(args, root, client)
+        config["hosts"].update(__markovclient(args, network, client))
 
-    xml_str = etree.tostring(root, pretty_print=True, xml_declaration=False)
-    with open("{}/{}".format(args.prefix, SHADOW_CONFIG_FILENAME), 'wb') as configfile:
-        configfile.write(xml_str)
+    with open("{}/{}".format(args.prefix, SHADOW_CONFIG_FILENAME), 'w') as configfile:
+        yaml.dump(config, configfile, sort_keys=False)
     # add them to all;
     if args.plugins_path:
         for (fp, authority) in authorities.items():
@@ -117,147 +185,270 @@ def __generate_shadow_config(args, authorities, relays, tgen_servers, perf_clien
         for perfclient in perf_clients:
             __add_plugins_to_config(args, perfclient['name'])
 
-def __get_scaled_tgen_client_bandwidth_kib(args):
+def __get_scaled_tgen_client_bandwidth_kbit(args):
     # 10 Mbit/s per "user" that a tgen client simulates
     n_users_per_tgen = round(1.0 / args.process_scale)
-    scaled_bw = n_users_per_tgen * 10 * BW_1MBIT_KIB
+    scaled_bw = n_users_per_tgen * 10 * BW_1MBIT_KBIT
     return scaled_bw
 
-def __get_scaled_tgen_server_bandwidth_kib(args):
-    scaled_client_bw = __get_scaled_tgen_client_bandwidth_kib(args)
+def __get_scaled_tgen_server_bandwidth_kbit(args):
+    scaled_client_bw = __get_scaled_tgen_client_bandwidth_kbit(args)
     n_clients_per_server = round(1.0 / args.process_scale)
     scaled_bw = scaled_client_bw * n_clients_per_server
     return scaled_bw
 
-def __add_xml_server(args, root, server):
-    # Make sure we have enough bandwidth for the expected number of clients
-    scaled_bw = __get_scaled_tgen_server_bandwidth_kib(args)
-    host_bw = max(BW_1GBIT_KIB, scaled_bw)
+def __filter_nodes(network, ip_address_hint, country_code_hint):
+    # networkx stores the node 'id' separately, so take the node id from the tuple and combine it
+    # with the other node properties
+    all_nodes = [{'id': node_id, **node} for (node_id, node) in network.nodes(data=True)]
 
-    # this should be a relative path
-    tgenrc = "{}/{}".format(CONFIG_DIRPATH, TGENRC_SERVER_FILENAME)
+    if ip_address_hint is not None and not ip_address_hint.is_global:
+        # ignore the hint if the IP address is not global
+        logging.debug(f"Ignoring non-global address {ip_address_hint}")
+        ip_address_hint = None
 
-    host = etree.SubElement(root, SHADOW_XML_HOST_KEY)
-    host.set("id", server['name'])
-    host.set("countrycodehint", server['country_code'])
-    host.set("bandwidthup", "{}".format(host_bw))
-    host.set("bandwidthdown", "{}".format(host_bw))
+    if country_code_hint is not None:
+        # normalize the country code
+        country_code_hint = country_code_hint.casefold()
 
-    process = etree.SubElement(host, SHADOW_XML_PROCESS_KEY)
-    process.set("plugin", "tgen")
-    # tgen starts at the end of shadow's "bootstrap" phase
-    process.set("starttime", "{}".format(BOOTSTRAP_LENGTH_SECONDS))
-    process.set("arguments", tgenrc)
+    # are there any nodes with the same ip address?
+    ip_match_found = any('ip_address' in node and IPv4Address(node['ip_address']) == ip_address_hint for node in all_nodes)
 
-def __add_xml_perfclient(args, root, client):
-    # these should be relative paths
-    torrc = "{}/{}".format(CONFIG_DIRPATH, TORRC_PERFCLIENT_FILENAME)
-    tgenrc = "{}/{}".format(CONFIG_DIRPATH, TGENRC_PERFCLIENT_FILENAME)
-    __add_xml_tgen_client(args, root, client['name'], client['country_code'], torrc, tgenrc)
-
-def __add_xml_markovclient(args, root, client):
-    # these should be relative paths
-    torrc = "{}/{}".format(CONFIG_DIRPATH, TORRC_MARKOVCLIENT_FILENAME)
-    tgenrc_filename = TGENRC_MARKOVCLIENT_FILENAME_FMT.format(client['name'])
-    tgenrc = "{}/{}/{}".format(CONFIG_DIRPATH, TGENRC_MARKOVCLIENT_DIRNAME, tgenrc_filename)
-    __add_xml_tgen_client(args, root, client['name'], client['country_code'], torrc, tgenrc)
-
-def __add_xml_tgen_client(args, root, name, country, torrc, tgenrc):
-    # Make sure we have enough bandwidth for the simulated number of users
-    scaled_bw = __get_scaled_tgen_client_bandwidth_kib(args)
-    host_bw = max(BW_1GBIT_KIB, scaled_bw)
-
-    host = etree.SubElement(root, SHADOW_XML_HOST_KEY)
-    host.set("id", name)
-    host.set("countrycodehint", country)
-    host.set("bandwidthup", "{}".format(host_bw))
-    host.set("bandwidthdown", "{}".format(host_bw))
-
-    process = etree.SubElement(host, SHADOW_XML_PROCESS_KEY)
-    process.set("plugin", "tor")
-    process.set("preload", "tor-preload")
-    process.set("starttime", "{}".format(BOOTSTRAP_LENGTH_SECONDS-60)) # start before boostrapping ends
-    if args.plugins_path:
-        process.set("arguments", TOR_ARGS_WITH_PLUGINS_FMT.format(name, torrc))
+    if ip_match_found:
+        # get all nodes with exact IP matches, regardless of the country code
+        candidate_nodes = [node for node in all_nodes if 'ip_address' in node and IPv4Address(node['ip_address']) == ip_address_hint]
     else:
-        process.set("arguments", TOR_ARGS_FMT.format(name, torrc))
+        # get all nodes with the same country code
+        candidate_nodes = [node for node in all_nodes if 'country_code' in node and node['country_code'].casefold() == country_code_hint]
 
-    oniontrace_start_time = BOOTSTRAP_LENGTH_SECONDS-60+1
-    __add_xml_oniontrace(args, host, oniontrace_start_time, name)
+        # if no node had the same country code, use all nodes
+        if len(candidate_nodes) == 0:
+            candidate_nodes = [node for node in all_nodes]
 
-    process = etree.SubElement(host, SHADOW_XML_PROCESS_KEY)
-    process.set("plugin", "tgen")
+        any_ip_found = any('ip_address' in node for node in candidate_nodes)
+
+        # if a node has an IP address and we were given an IP hint, perform longest prefix matching
+        if any_ip_found and ip_address_hint is not None:
+            # exclude nodes without an IP address
+            candidate_nodes = [node for node in candidate_nodes if 'ip_address' in node]
+
+            # function to compute the prefix match between two IPv4 addresses
+            # the 32-bit mask is required since python uses signed integers
+            #   (see https://stackoverflow.com/questions/210629/python-unsigned-32-bit-bitwise-arithmetic/210740)
+            def compute_prefix_match(ip_1, ip_2): return ~(int(ip_1) ^ int(ip_2)) & 0xffffffff
+
+            # get the prefix match for each node
+            prefix_matches = [(node, compute_prefix_match(IPv4Address(node['ip_address']), ip_address_hint)) for node in candidate_nodes]
+
+            # get the longest prefix match
+            max_prefix_match = max(prefix_matches, key=lambda x: x[1])[1]
+
+            # get the nodes with the longest prefix match
+            candidate_nodes = [node for (node, prefix_match) in prefix_matches if prefix_match == max_prefix_match]
+
+            # given the 'compute_prefix_match' function above, these nodes should all have the same IP address
+            assert len(set([IPv4Address(node['ip_address']) for node in candidate_nodes])) == 1
+
+    return candidate_nodes
+
+def __server(args, network, server):
+    # Make sure we have enough bandwidth for the expected number of clients
+    scaled_bw_kbit = __get_scaled_tgen_server_bandwidth_kbit(args)
+    host_bw_kbit = max(BW_1GBIT_KBIT, scaled_bw_kbit)
+
+    # filter the network graph nodes by their country, and choose one node
+    country_code_hint = server.get('country_code')
+    chosen_node = random.choice(__filter_nodes(network, None, country_code_hint))
+
+    # add the host element and attributes
+    host = {}
+    host['network_node_id'] = chosen_node['id']
+
+    host["bandwidth_up"] = "{} kilobit".format(host_bw_kbit)
+    host["bandwidth_down"] = "{} kilobit".format(host_bw_kbit)
+
+    host["processes"] = []
+
+    process = {}
+    process["path"] = "{}/bin/tgen".format(SHADOW_INSTALL_PREFIX)
+    process["args"] = get_host_rel_conf_path(TGENRC_SERVER_FILENAME)
+    # tgen starts at the end of shadow's "bootstrap" phase
+    process["start_time"] = BOOTSTRAP_LENGTH_SECONDS
+
+    if server['is_hs_server']:
+        # this is an onion service, so tgen should only listen on localhost so that we catch errors if we accidentally
+        # try connecting to the onion service from "exit" clients
+        process["environment"] = "TGENIP=127.0.0.1"
+
+    host["processes"].append(process)
+
+    if server['is_hs_server']:
+        # prepare the hostname and hs_ed25519_secret_key files for the onion service
+        hosts_prefix = "{}/{}/{}".format(args.prefix, SHADOW_TEMPLATE_PATH, SHADOW_HOSTS_PATH)
+        server_prefix = "{}/{}".format(hosts_prefix, server['name'])
+        hs_prefix = "{}/{}".format(server_prefix, TOR_ONIONSERVICE_DIR)
+
+        if not os.path.exists(hs_prefix):
+            os.makedirs(hs_prefix, 0o700)
+
+        with open("{}/{}".format(hs_prefix, 'hostname'), 'w') as outf:
+            outf.write(server['hs_hostname'] + '\n')
+        with open("{}/{}".format(hs_prefix, 'hs_ed25519_secret_key'), 'wb') as outf:
+            outf.write(b"== ed25519v1-secret: type0 ==\x00\x00\x00" + base64.b64decode(server['hs_ed25519_secret_key']))
+
+        # tor process for the onion service
+        process = {}
+        process["path"] = "{}/bin/tor".format(SHADOW_INSTALL_PREFIX)
+        # clients don't need a nickname, and our client nicknames are longer than the max length supported by tor
+        process["args"] = __format_tor_args(None)
+        process["start_time"] = max(1, BOOTSTRAP_LENGTH_SECONDS - 60) # start before boostrapping ends
+
+        host["processes"].append(process)
+
+    return {server['name']: host}
+
+def __perfclient(args, network, client):
+    # a perfclient can have one of two tgen configurations which specifies which servers it connects to
+    if not client['is_hs_client']:
+        tgenrc_fname = TGENRC_PERFCLIENT_EXIT_FILENAME
+    else:
+        tgenrc_fname = TGENRC_PERFCLIENT_HS_FILENAME
+
+    return __tgen_client(args, network, client['name'], client['country_code'],
+                         get_host_rel_conf_path(tgenrc_fname))
+
+def __markovclient(args, network, client):
+    # these should be relative paths
+    return __tgen_client(args, network, client['name'], client['country_code'],
+                         TGENRC_MARKOVCLIENT_FILENAME)
+
+def __format_tor_args(name):
+    args = []
+
+    if name is not None:
+        args.append(f"--Address {name}")
+
+        # tor nicknames must be between 1 and 19 characters inclusive
+        if len(name) < 1 or len(name) > 19:
+            logging.warning(f'Nickname {name} is too long and will likely cause tor to exit')
+
+        args.append(f"--Nickname {name}")
+
+    args.append(f"--defaults-torrc {TORRC_DEFAULTS_HOST_FILENAME}")
+    args.append(f"-f {TORRC_HOST_FILENAME}")
+
+    return ' '.join(args)
+
+def __tgen_client(args, network, name, country, tgenrc_fname):
+    # Make sure we have enough bandwidth for the simulated number of users
+    scaled_bw_kbit = __get_scaled_tgen_client_bandwidth_kbit(args)
+    host_bw_kbit = max(BW_1GBIT_KBIT, scaled_bw_kbit)
+
+    # filter the network graph nodes by their country, and choose one node
+    country_code_hint = country
+    chosen_node = random.choice(__filter_nodes(network, None, country_code_hint))
+
+    # add the host element and attributes
+    host = {}
+    host['network_node_id'] = chosen_node['id']
+
+    host["bandwidth_up"] = "{} kilobit".format(host_bw_kbit)
+    host["bandwidth_down"] = "{} kilobit".format(host_bw_kbit)
+
+    host["processes"] = []
+
+    process = {}
+    process["path"] = "{}/bin/tor".format(SHADOW_INSTALL_PREFIX)
+    # clients don't need a nickname, and our client nicknames are longer than the max length supported by tor
+    process["args"] = __format_tor_args(None)
+    # https://shadow.github.io/docs/guide/compatibility_notes.html#libopenblas
+    process["environment"] = "OPENBLAS_NUM_THREADS=1"
+    process["start_time"] = max(1, BOOTSTRAP_LENGTH_SECONDS - 60) # start before boostrapping ends
+
+    host["processes"].append(process)
+
+    oniontrace_start_time = max(2, BOOTSTRAP_LENGTH_SECONDS - 60 + 1)
+    host["processes"].extend(__oniontrace(args, oniontrace_start_time, name))
+
+    process = {}
+    process["path"] = "{}/bin/tgen".format(SHADOW_INSTALL_PREFIX)
+    process["args"] = tgenrc_fname
     # tgen starts at the end of shadow's "bootstrap" phase, and may have its own startup delay
-    process.set("starttime", "{}".format(BOOTSTRAP_LENGTH_SECONDS))
-    process.set("arguments", tgenrc)
+    process["start_time"] = BOOTSTRAP_LENGTH_SECONDS
 
-def __add_xml_tor_relay(args, root, relay, orig_fp, is_authority=False):
+    host["processes"].append(process)
+
+    return {name: host}
+
+def __tor_relay(args, network, used_addresses, relay, orig_fp, is_authority=False):
     # prepare items for the host element
-    kib = int(round(int(relay['bandwidth_capacity']) / 1024.0))
+    kbits = 8 * int(round(int(relay['bandwidth_capacity']) / 1000.0))
 
     hosts_prefix = "{}/{}/{}".format(args.prefix, SHADOW_TEMPLATE_PATH, SHADOW_HOSTS_PATH)
     with open("{}/{}/fingerprint-public-tor".format(hosts_prefix, relay['nickname']), 'w') as outf:
         outf.write(f"{orig_fp}\n")
 
+    # filter the network graph nodes by their IP address and country, and choose one node
+    ip_address_hint = IPv4Address(relay['address']) if 'address' in relay else None
+    country_code_hint = relay.get('country_code')
+    chosen_node = random.choice(__filter_nodes(network, ip_address_hint, country_code_hint))
+
     # add the host element and attributes
-    host = etree.SubElement(root, SHADOW_XML_HOST_KEY)
-    host.set("id", relay['nickname'])
-    host.set("iphint", relay['address'])
-    host.set("countrycodehint", relay['country_code'])
-    host.set("bandwidthdown", "{}".format(kib))
-    host.set("bandwidthup", "{}".format(kib))
+    host = {}
+    host['network_node_id'] = chosen_node['id']
+
+    if ip_address_hint:
+        host["ip_addr"] = str(__assign_address(used_addresses, ip_address_hint))
+
+    host["bandwidth_down"] = "{} kilobit".format(kbits)
+    host["bandwidth_up"] = "{} kilobit".format(kbits)
 
     # prepare items for the tor process element
     if is_authority:
         starttime = 1
-        torrc = "{}/{}".format(CONFIG_DIRPATH, TORRC_AUTHORITY_FILENAME)
     elif "exitguard" in relay['nickname']:
         starttime = 2
-        torrc = "{}/{}".format(CONFIG_DIRPATH, TORRC_EXITRELAY_FILENAME)
     elif "exit" in relay['nickname']:
         starttime = 3
-        torrc = "{}/{}".format(CONFIG_DIRPATH, TORRC_EXITRELAY_FILENAME)
     elif "guard" in relay['nickname']:
         starttime = 4
-        torrc = "{}/{}".format(CONFIG_DIRPATH, TORRC_NONEXITRELAY_FILENAME)
     else:
         starttime = 5
-        torrc = "{}/{}".format(CONFIG_DIRPATH, TORRC_NONEXITRELAY_FILENAME)
-    if args.plugins_path:
-        tor_args = TOR_ARGS_WITH_PLUGINS_FMT.format(relay['nickname'], torrc)
-    else:
-        tor_args = TOR_ARGS_FMT.format(relay['nickname'], torrc)
-    if not is_authority:
-        # Tor enforces a min rate for relays
-        rate = max(BW_RATE_MIN, relay['bandwidth_rate'])
-        burst = max(BW_RATE_MIN, relay['bandwidth_burst'])
-        tor_args += " --BandwidthRate {} --BandwidthBurst {}".format(rate, burst)
 
-    process = etree.SubElement(host, SHADOW_XML_PROCESS_KEY)
+    host['processes'] = []
 
-    process.set("plugin", "tor")
-    process.set("preload", "tor-preload")
-    process.set("starttime", "{}".format(starttime))
-    process.set("arguments", "{}".format(tor_args))
+    process = {}
+    process["path"] = "{}/bin/tor".format(SHADOW_INSTALL_PREFIX)
+    process["args"] = str(__format_tor_args(relay['nickname']))
+    process["start_time"] = starttime
 
-    oniontrace_start_time = starttime+1
-    __add_xml_oniontrace(args, host, oniontrace_start_time, relay['nickname'])
+    host['processes'].append(process)
 
-def __add_xml_oniontrace(args, parent_elm, start_time, name):
+    oniontrace_start_time = starttime + 1
+    host['processes'].extend(__oniontrace(args, oniontrace_start_time, relay['nickname']))
+
+    return {relay['nickname']: host}
+
+def __oniontrace(args, start_time, name):
+    processes = []
+
     if args.events_csv is not None:
-        process = etree.SubElement(parent_elm, SHADOW_XML_PROCESS_KEY)
-        process.set("plugin", "oniontrace")
-        process.set("starttime", "{}".format(start_time))
-        process.set("arguments", "Mode=log TorControlPort={} LogLevel=info Events={}".format(TOR_CONTROL_PORT, args.events_csv))
+        process = {}
+        process["path"] = "{}/bin/oniontrace".format(SHADOW_INSTALL_PREFIX)
+        process["args"] = "Mode=log TorControlPort={} LogLevel=info Events={}".format(TOR_CONTROL_PORT, args.events_csv)
+        process["start_time"] = start_time
+        processes.append(process)
 
     if args.do_trace:
         start_time = max(start_time, BOOTSTRAP_LENGTH_SECONDS)
-        process = etree.SubElement(parent_elm, SHADOW_XML_PROCESS_KEY)
-        process.set("plugin", "oniontrace")
-        process.set("starttime", "{}".format(start_time))
-        run_time = SIMULATION_LENGTH_SECONDS-start_time-1
-        tracefile_path = "{}/{}/{}/oniontrace.csv".format(SHADOW_DATA_PATH, SHADOW_HOSTS_PATH, name)
-        process.set("arguments", "Mode=record TorControlPort={} LogLevel=info RunTime={} TraceFile={}".format(TOR_CONTROL_PORT, run_time, tracefile_path))
+        process = {}
+        process["path"] = "{}/bin/oniontrace".format(SHADOW_INSTALL_PREFIX)
+        run_time = SIMULATION_LENGTH_SECONDS - start_time - 1
+        process["args"] = "Mode=record TorControlPort={} LogLevel=info RunTime={} TraceFile=oniontrace.csv".format(TOR_CONTROL_PORT, run_time)
+        process["start_time"] = start_time
+        processes.append(process)
+
+    return processes
 
 def __add_plugins_to_config(args, name):
     hosts_prefix = "{}/{}/{}".format(args.prefix, SHADOW_TEMPLATE_PATH, SHADOW_HOSTS_PATH)

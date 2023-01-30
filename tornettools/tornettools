@@ -81,7 +81,7 @@ DESC_PLOT = """
 Visualizes various performance metrics that were extracted and
 stored with the parse command by producing graphical plots.
 
-This command should be used after running plot.
+This command should be used after running parse.
 """
 
 HELP_ARCHIVE = """
@@ -125,7 +125,7 @@ def __setup_logging(args):
             # log to a file too
             prefixstr = str(args.prefix)
             funcstr = str(args.command) if args.command is not None else "none"
-            datestr = datetime.now().strftime("%Y-%m-%d.%H:%M:%S")
+            datestr = datetime.now().strftime("%Y-%m-%d.%H.%M.%S")
             logfilename = "{}/tornettools.{}.{}.log".format(prefixstr, funcstr, datestr)
         __setup_logging_helper(logfilename)
     else:
@@ -149,7 +149,9 @@ def main():
         default=0)
 
     main_parser.add_argument('-s', '--seed',
-        help="""Initialize PRNGs with a seed to allow for deterministic behavior.""",
+        help="""Initialize tornettools' PRNGs with a seed to allow for
+            deterministic behavior. This does not affect the seed for the Shadow
+            simulation.""",
         action="store", type=int, dest="seed", metavar="N",
         default=None)
 
@@ -175,6 +177,11 @@ def main():
     stage_parser.add_argument("user_stats_path",
         help="Path to a Tor user stats file (https://metrics.torproject.org/userstats-relay-country.csv)",
         type=__type_str_file_path_in)
+
+    stage_parser.add_argument("tmodel_git_path",
+        help="Path to a local directory that contains a git clone of the repo: \
+            'https://github.com/tmodel-ccs2018/tmodel-ccs2018.github.io.git'",
+        type=__type_str_dir_path_in)
 
     stage_parser.add_argument('-o', '--onionperf_data_path',
         help="Path to a directory of onionperf performance data",
@@ -232,6 +239,10 @@ def main():
         help="Path to a user-info-staging.json file produced with the 'stage' command",
         type=__type_str_file_path_in)
 
+    generate_parser.add_argument("network_info_path",
+        help="Path to a network-info-staging.json file produced with the 'stage' command",
+        type=__type_str_file_path_in)
+
     generate_parser.add_argument("tmodel_git_path",
         help="Path to a local directory that contains a git clone of the repo: \
             'https://github.com/tmodel-ccs2018/tmodel-ccs2018.github.io.git'",
@@ -278,14 +289,29 @@ def main():
         action="store", dest="server_scale",
         default=0.1)
 
-    generate_parser.add_argument('-t', '--torperf_scale',
-        help="""A fractional number representing the ratio of the number of Perf clients to the
-            number of Tor clients that we emulate. E.g., a value of 0.001 means that we will run
-            1 Perf client for every 1/0.001=1000 Tor clients. Perf clients help us benchmark Tor
-            performance during an experiment and validate against Tor metrics.""",
-        metavar="N", type=__type_fractional_float,
-        action="store", dest="torperf_scale",
-        default=0.001)
+    generate_parser.add_argument('--torperf_num_exit',
+        help="""
+            Number of Perf clients using exit circuits to
+            add to the network. Perf clients help us benchmark Tor performance
+            during an experiment and validate against Tor metrics. Increasing
+            this number generates more data, but also increases the cost of the
+            simulation and load on the simulated network.
+        """,
+        metavar="N", type=__type_nonnegative_integer,
+        action="store", dest="torperf_num_exit",
+        default=100)
+
+    generate_parser.add_argument('--torperf_num_onion_service',
+        help="""
+            Number of Perf clients using onion services to
+            add to the network. Perf clients help us benchmark Tor performance
+            during an experiment and validate against Tor metrics. Increasing
+            this number generates more data, but also increases the cost of the
+            simulation and load on the simulated network.
+        """,
+        metavar="N", type=__type_nonnegative_integer,
+        action="store", dest="torperf_num_onion_service",
+        default=0)
 
     generate_parser.add_argument('-l', '--load_scale',
         help="""A float number by which we scale the number of circuit flows created by each TGen
@@ -298,13 +324,31 @@ def main():
         action="store", dest="load_scale",
         default=1.0)
 
+    generate_parser.add_argument('--onion_service_user_scale',
+        help="""A float number by which we scale (multiply) the number of
+        onion-service users and servers. Does *not* change traffic generated
+        *per* user. i.e. *does* scale *total* onion service traffic in the
+        network.""",
+        metavar="N", type=__type_nonnegative_float,
+        action="store", dest="onion_service_user_scale",
+        default=0.0)
+
+    generate_parser.add_argument('--exit_user_scale',
+        help="""A float number by which we scale (multiply) the number of exit
+        (non-onion-service) users and servers.  Does not change traffic
+        generated *per* user. i.e. *does* scale *total* exit traffic in the
+        network.""",
+        metavar="N", type=__type_fractional_float,
+        action="store", dest="exit_user_scale",
+        default=1.0)
+
     generate_parser.add_argument('-a', '--atlas',
         help="""The path to a decompressed version of the atlas topology file that Shadow should
             use to construct its network. Use this option to avoid storing duplicate atlas files;
             if this option is unspecified, then we will copy the atlas from the tmodel_git_path repo
             into the config directory that we generate.
             (A compressed version of the file is normally available at
-            'tmodel_git_path/data/shadow/network/atlas.201801.shadow113.graphml.xml.xz'.)""",
+            'tmodel_git_path/data/shadow/network/atlas_v201801.shadow_v2.gml.xz'.)""",
         metavar="PATH", type=__type_str_file_path_in,
         action="store", dest="atlas_path",
         default=None)
@@ -345,6 +389,14 @@ def main():
         action="store",
         nargs="+")
 
+    generate_parser.add_argument('-g', '--geoip_path',
+        help="""A file PATH to an existing geoip file (usually in TOR_SRCDIR/tor/src/config/geoip
+            or TOR_INSTALLDIR/share/tor/geoip.) Unneeded for most sims, and uses around 9 MB of RAM
+            per tor process.""",
+        metavar="PATH", type=__type_str_file_path_in,
+        action="store", dest="geoip_path",
+        default=None)
+
     ############
     # simulate #
     ############
@@ -359,19 +411,34 @@ def main():
         type=__type_str_dir_path_in)
 
     simulate_parser.add_argument('-s', '--shadow',
-        help="""Path to a compile 'shadow' executable to use when running the simulation.""",
+        help="""Path to a compiled 'shadow' executable to use when running the simulation.""",
         metavar="PATH", type=__type_str_file_path_in,
-        action="store", dest="shadowexe",
+        action="store", dest="shadow_exe",
         default=which("shadow"))
 
+    # We set parallelism to cpu_count / 2 since we observed that this can run up to 3 times
+    # faster on machines with Intel hyperthreading enabled.
+    # Non-hyperthreaded CPUs may perform better with cpu_count instead.
     simulate_parser.add_argument('-a', '--args',
-        help="""The argument string to pass to Shadow when running the simulation.""",
+        help="""The Shadow options to use when running the simulation.""",
         type=str,
         action="store", dest="shadow_args",
-        default="--workers={} --seed=666".format(cpu_count()))
+        # The template directory is also set to the same value in the configuration file.
+        # It is set here as well so that old shadow simulations that don't have it set in
+        # the configuration file will still run correctly. This option can be removed from
+        # these default shadow options in the future.
+        default="--parallelism={} --seed=666 --template-directory=shadow.data.template".format(cpu_count()//2))
+
+    # This option allows us to swap the filename with shadow.config.xml in Shadow v1.15.x.
+    # Once we no longer care about supporting Shadow v1.15.x, we could remove this option.
+    simulate_parser.add_argument('-f', '--filename',
+        help="""The Shadow config filename to use when running the simulation.""",
+        type=str,
+        action="store", dest="shadow_config",
+        default="shadow.config.yaml")
 
     simulate_parser.add_argument('-c', '--compress',
-        help="""Compress output with lzma.""",
+        help="""Compress log output from Shadow using lzma.""",
         action="store_true", dest="do_compress",
         default=False)
 
@@ -399,6 +466,16 @@ def main():
         metavar="N", type=__type_nonnegative_integer,
         action="store", dest="nprocesses",
         default=0)
+
+    parse_parser.add_argument('-s', '--skip-raw',
+        help="""Skip trying to parse raw logs from
+            <tornet_config_path>/shadow.data/hosts into
+            <tornet_config_path>/*.json.xz, continuing on to parse
+            <tornet_config_path>/*.json.xz into
+            <tornet_config_path>/tornet.plot.data/*.json. This is useful if you
+            no longer have those raw logs, but want to re-parse and/or re-plot
+            with updated post-processing. """,
+            action="store_true", dest="skip_raw", default=False)
 
     parse_parser.add_argument('-c', '--converge-time',
         help="""The number of seconds after the beginning of the simulation that we
@@ -537,40 +614,57 @@ def main():
     logging.info("System info: {}".format(str(uname())))
 
     # now run the configured mode
-    args.func(args)
+    rv = args.func(args)
+
+    if rv == 0 or rv == None:
+        return 0
+    elif isinstance(rv, int):
+        return rv
+    else:
+        logging.warning(f"Unknown return value: {rv}")
+        return 1
 
 def stage(args):
     from tornettools import stage
-    stage.run(args)
+    rv = stage.run(args)
+    if rv != 0 and rv != None:
+        return rv
+
     from tornettools import parse_onionperf
-    parse_onionperf.run(args)
+    return parse_onionperf.run(args)
 
 def generate(args):
     if args.events_csv.lower() == "none":
         args.events_csv = None
     from tornettools import generate
-    generate.run(args)
+    return generate.run(args)
 
 def simulate(args):
     from tornettools import simulate
-    simulate.run(args)
+    return simulate.run(args)
 
 def parse(args):
     from tornettools import parse
-    parse.run(args)
+    return parse.run(args)
 
 def plot(args):
     from tornettools import plot
-    plot.run(args)
+    return plot.run(args)
 
 def archive(args):
     from tornettools import archive
-    archive.run(args)
+    return archive.run(args)
 
 def __type_nonnegative_integer(value):
     i = int(value)
     if i < 0:
         raise argparse.ArgumentTypeError("'%s' is an invalid non-negative int value" % value)
+    return i
+
+def __type_nonnegative_float(value):
+    i = float(value)
+    if i < 0.0:
+        raise argparse.ArgumentTypeError("'%s' is an invalid non-negative flat value" % value)
     return i
 
 def __type_fractional_float(value):

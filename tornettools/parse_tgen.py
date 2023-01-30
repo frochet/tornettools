@@ -2,19 +2,28 @@ import os
 import logging
 import datetime
 import subprocess
+import re
 
-from tornettools.util import which, cmdsplit, open_writeable_file, load_json_data, dump_json_data
+from tornettools.util import which, open_writeable_file, load_json_data, dump_json_data, aka_int, tgen_stream_seconds_at_bytes
 
 def parse_tgen_logs(args):
     tgentools_exe = which('tgentools')
 
-    if tgentools_exe == None:
+    if tgentools_exe is None:
         logging.warning("Cannot find tgentools in your PATH. Is your python venv active? Do you have tgentools installed?")
         logging.warning("Unable to parse tgen simulation data.")
         return
 
-    cmd_str = f"{tgentools_exe} parse -m {args.nprocesses} -e 'perfclient.*tgen.*\.log' --complete shadow.data/hosts"
-    cmd = cmdsplit(cmd_str)
+    # tgentools supports a list of expressions that are used to search for oniontrace log filenames
+    # the first -e expression matches the log file names for Shadow v2.x.x
+    # and the second -e expression matches the log file names for Shadow v1.x.x
+    cmd = [tgentools_exe,
+           'parse',
+           '-m', str(args.nprocesses),
+           '-e', r'perfclient[0-9]+(exit|onionservice)?\.tgen\.[0-9]+\.stdout',
+           '-e', r'stdout\.*perfclient[0-9]+\.tgen\.[0-9]+\.log',
+           '--complete',
+           'shadow.data/hosts']
 
     datestr = datetime.datetime.now().strftime("%Y-%m-%d.%H:%M:%S")
 
@@ -40,55 +49,74 @@ def extract_tgen_plot_data(args):
     # parse performance stats only after the network has reached steady state
     startts, stopts = args.converge_time, -1 if args.run_time < 0 else args.converge_time + args.run_time
 
-    __extract_round_trip_time(args, data, startts, stopts)
-    __extract_download_time(args, data, startts, stopts)
-    __extract_error_rate(args, data, startts, stopts)
-    __extract_client_goodput(args, data, startts, stopts)
+    for circuittype in ('exit', 'onionservice'):
+        __extract_round_trip_time(args, data, circuittype, startts, stopts)
+        __extract_download_time(args, data, circuittype, startts, stopts)
+        __extract_error_rate(args, data, circuittype, startts, stopts)
+        __extract_client_goodput(args, data, circuittype, startts, stopts)
+        __extract_client_goodput_5MiB(args, data, circuittype, startts, stopts)
 
-def __extract_round_trip_time(args, data, startts, stopts):
-    rtt = __get_round_trip_time(data, startts, stopts)
-    outpath = f"{args.prefix}/tornet.plot.data/round_trip_time.json"
+def __extract_round_trip_time(args, data, circuittype, startts, stopts):
+    rtt = __get_round_trip_time(data, circuittype, startts, stopts)
+    outpath = f"{args.prefix}/tornet.plot.data/round_trip_time.{circuittype}.json"
     dump_json_data(rtt, outpath, compress=False)
 
-def __extract_download_time(args, data, startts, stopts):
+def __extract_download_time(args, data, circuittype, startts, stopts):
     key = "time_to_first_byte_recv"
-    dt = __get_download_time(data, startts, stopts, key)
-    outpath = f"{args.prefix}/tornet.plot.data/{key}.json"
+    dt = __get_download_time(data, circuittype, startts, stopts, key)
+    outpath = f"{args.prefix}/tornet.plot.data/{key}.{circuittype}.json"
     dump_json_data(dt, outpath, compress=False)
 
     key = "time_to_last_byte_recv"
-    dt = __get_download_time(data, startts, stopts, key)
-    outpath = f"{args.prefix}/tornet.plot.data/{key}.json"
+    dt = __get_download_time(data, circuittype, startts, stopts, key)
+    outpath = f"{args.prefix}/tornet.plot.data/{key}.{circuittype}.json"
     dump_json_data(dt, outpath, compress=False)
 
-def __extract_error_rate(args, data, startts, stopts):
-    errrate_per_client = __get_error_rate(data, startts, stopts)
-    outpath = f"{args.prefix}/tornet.plot.data/error_rate.json"
+def __extract_error_rate(args, data, circuittype, startts, stopts):
+    errrate_per_client = __get_error_rate(data, circuittype, startts, stopts)
+    outpath = f"{args.prefix}/tornet.plot.data/error_rate.{circuittype}.json"
     dump_json_data(errrate_per_client, outpath, compress=False)
 
-def __extract_client_goodput(args, data, startts, stopts):
-    client_goodput = __get_client_goodput(data, startts, stopts)
-    outpath = f"{args.prefix}/tornet.plot.data/perfclient_goodput.json"
+def __extract_client_goodput(args, data, circuittype, startts, stopts):
+    # goodput between 500 kibibytes and 1 mebibyte. Old way of calcuting throughput.
+    # https://metrics.torproject.org/reproducible-metrics.html#performance
+    client_goodput = __get_client_goodput(
+        data, circuittype, startts, stopts,
+        aka_int(512000, 500 * 2**10),
+        aka_int(1048576, 2**20))
+    outpath = f"{args.prefix}/tornet.plot.data/perfclient_goodput.{circuittype}.json"
     dump_json_data(client_goodput, outpath, compress=False)
 
-def __get_download_time(data, startts, stopts, bytekey):
-    dt = {'ALL':[]}
+def __extract_client_goodput_5MiB(args, data, circuittype, startts, stopts):
+    # goodput of the 5th Mebibyte. metrics.torproject uses this as of ~ April 2021.
+    # https://gitlab.torproject.org/tpo/network-health/metrics/statistics/-/issues/40005
+    # https://gitlab.torproject.org/tpo/network-health/metrics/statistics/-/issues/40020
+    # https://metrics.torproject.org/reproducible-metrics.html#performance
+    client_goodput = __get_client_goodput(
+        data, circuittype, startts, stopts,
+        aka_int(4194304, 4 * 2**20),
+        aka_int(5242880, 5 * 2**20))
+    outpath = f"{args.prefix}/tornet.plot.data/perfclient_goodput_5MiB.{circuittype}.json"
+    dump_json_data(client_goodput, outpath, compress=False)
 
-    # download times can differ by microseconds in tgen
-    resolution = 1.0/1000000.0
+def __get_download_time(data, circuittype, startts, stopts, bytekey):
+    dt = {'ALL': []}
 
+    # download times can differ by microseconds in tgen.
+    # TODO: use
+    # resolution = 1.0 / 1000000.0
+
+    pattern = re.compile(r'perfclient\d+' + circuittype)
     if 'data' in data:
         for name in data['data']:
-            if 'perfclient' not in name:
+            if pattern.match(name) is None:
                 continue
             db = data['data'][name]
             ss = db['tgen']['stream_summary']
-            mybytes, mytime = 0, 0.0
             if bytekey in ss:
                 for header in ss[bytekey]:
-                    bytes = int(header)
                     for secstr in ss[bytekey][header]:
-                        sec = int(secstr)-946684800
+                        sec = int(secstr) - 946684800
                         if sec >= startts and (stopts < 0 or sec < stopts):
                             #mydlcount += len(data['nodes'][name]['lastbyte'][header][secstr])
                             for dl in ss[bytekey][header][secstr]:
@@ -99,15 +127,17 @@ def __get_download_time(data, startts, stopts, bytekey):
                                 dt.setdefault(header, []).append(item)
     return dt
 
-def __get_round_trip_time(data, startts, stopts):
+def __get_round_trip_time(data, circuittype, startts, stopts):
     rtt = []
 
-    # rtts can differ by microseconds in tgen
-    resolution = 1.0/1000000.0
+    # rtts can differ by microseconds in tgen.
+    # TODO: use
+    # resolution = 1.0 / 1000000.0
 
+    pattern = re.compile(r'perfclient\d+' + circuittype)
     if 'data' in data:
         for name in data['data']:
-            if 'perfclient' not in name:
+            if pattern.match(name) is None:
                 continue
 
             db = data['data'][name]
@@ -115,7 +145,7 @@ def __get_round_trip_time(data, startts, stopts):
 
             if 'round_trip_time' in ss:
                 for secstr in ss['round_trip_time']:
-                    sec = int(secstr)-946684800
+                    sec = int(secstr) - 946684800
                     if sec >= startts and (stopts < 0 or sec < stopts):
                         for val in ss['round_trip_time'][secstr]:
                             #item = [val, resolution]
@@ -124,12 +154,14 @@ def __get_round_trip_time(data, startts, stopts):
 
     return rtt
 
-def __get_error_rate(data, startts, stopts):
+def __get_error_rate(data, circuittype, startts, stopts):
     errors_per_client = {'ALL': []}
+
+    pattern = re.compile(r'perfclient\d+' + circuittype)
 
     if 'data' in data:
         for name in data['data']:
-            if 'perfclient' not in name:
+            if pattern.match(name) is None:
                 continue
             db = data['data'][name]
             ss = db['tgen']['stream_summary']
@@ -141,7 +173,7 @@ def __get_error_rate(data, startts, stopts):
             if key in ss:
                 for header in ss[key]:
                     for secstr in ss[key][header]:
-                        sec = int(secstr)-946684800
+                        sec = int(secstr) - 946684800
                         if sec >= startts and (stopts < 0 or sec < stopts):
                             mydlcount += len(ss[key][header][secstr])
 
@@ -149,14 +181,14 @@ def __get_error_rate(data, startts, stopts):
             if key in ss:
                 for errtype in ss[key]:
                     for secstr in ss[key][errtype]:
-                        sec = int(secstr)-946684800
+                        sec = int(secstr) - 946684800
                         if sec >= startts and (stopts < 0 or sec < stopts):
                             num_err = len(ss[key][errtype][secstr])
                             errtype_counts.setdefault(errtype, 0)
                             errtype_counts[errtype] += num_err
                             errtype_counts['ALL'] += num_err
 
-            attempted_dl_count = mydlcount+errtype_counts['ALL']
+            attempted_dl_count = mydlcount + errtype_counts['ALL']
 
             #logging.info("attempted {} downloads, {} completed, {} failed".format(attempted_dl_count, mydlcount, errtype_counts['ALL']))
 
@@ -164,47 +196,46 @@ def __get_error_rate(data, startts, stopts):
                 errcount = float(errtype_counts['ALL'])
                 dlcount = float(attempted_dl_count)
 
-                error_rate = 100.0*errcount/dlcount
-                resolution = 100.0/dlcount
+                error_rate = 100.0 * errcount / dlcount
+                resolution = 100.0 / dlcount
                 errors_per_client['ALL'].append([error_rate, resolution])
 
                 for errtype in errtype_counts:
                     errcount = float(errtype_counts[errtype])
-                    error_rate = 100.0*errcount/dlcount
-                    resolution = 100.0/dlcount
+                    error_rate = 100.0 * errcount / dlcount
+                    resolution = 100.0 / dlcount
                     errors_per_client.setdefault(errtype, []).append([error_rate, resolution])
 
     return errors_per_client
 
-def __get_client_goodput(data, startts, stopts):
-    # Tor computs gput based on the time between the .5 MiB byte to the 1 MiB byte.
-    # Ie to cut out circuit build and other startup costs.
-    # https://metrics.torproject.org/reproducible-metrics.html#performance
-
+def __get_client_goodput(data, circuittype, startts, stopts, start_bytes, end_bytes):
     goodput = []
 
-    resolution = 0.0 # TODO: goodput would be in bits/second
+    # TODO: goodput would be in bits/second
+    # resolution = 0.0
+
+    pattern = re.compile(r'perfclient\d+' + circuittype)
 
     # example json format
     #['data']['perfclient1']['tgen']['streams']["blah:blah:localhost:etc"]['elapsed_seconds']['payload_bytes_recv']['512000'] = 3.4546
 
     if 'data' in data:
         for name in data['data']:
-            if 'perfclient' not in name:
+            if pattern.match(name) is None:
                 continue
             db = data['data'][name]
             streams = db['tgen']['streams']
 
             for sid in streams:
                 stream = streams[sid]
-                if "elapsed_seconds" in stream and \
-                    "payload_bytes_recv" in stream['elapsed_seconds']:
-                    bytes_db = stream['elapsed_seconds']['payload_bytes_recv']
-                    if '512000' in bytes_db and '1048576' in bytes_db:
-                        seconds = float(bytes_db['1048576']) - float(bytes_db['512000'])
-                        bytes = 1048576 - 512000
-                        mbit = bytes/1048576.0*8.0
-                        mbit_per_second = mbit/seconds
-                        goodput.append(mbit_per_second)
+                start_time = tgen_stream_seconds_at_bytes(stream, start_bytes)
+                end_time = tgen_stream_seconds_at_bytes(stream, end_bytes)
+                if start_time is not None and end_time is not None and end_time > start_time:
+                    bps = (end_bytes - start_bytes) * 8.0 / (end_time - start_time)
+                    # We ultimately want to graph Mbps, but for compatibility
+                    # with old data sets, we record Mibi-bps. This is
+                    # converted to Mbps in the `plot` step.
+                    Mibps = bps / 2**20
+                    goodput.append(Mibps)
 
     return goodput

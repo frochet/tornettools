@@ -1,4 +1,3 @@
-import sys
 import os
 import logging
 import shutil
@@ -9,7 +8,7 @@ from tornettools.util import which, cmdsplit
 def run(args):
     logging.info("Starting to archive simulation results now.")
 
-    if which('xz') == None or which('tar') == None or which('dd') == None:
+    if which('xz') is None or which('tar') is None or which('dd') is None:
         logging.warning("We require the tar, xz, and dd tools to archive the results.")
         logging.critical("Unable to archive with missing tools.")
         return
@@ -19,7 +18,8 @@ def run(args):
     logging.info("Compressing consensus.")
     __xz_parallel(args, "consensus")
     logging.info("Compressing shadow config.")
-    __xz_parallel(args, "shadow.config.xml")
+    __xz_parallel(args, "shadow.config.xml") # for shadow v1.15.x
+    __xz_parallel(args, "shadow.config.yaml") # for shadow v2.x.x
     logging.info("Compressing dstat log.")
     __xz_parallel(args, "dstat.log")
     logging.info("Compressing free log.")

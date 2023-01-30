@@ -51,7 +51,10 @@ Here is a bibtex entry for latex users:
     python3 -m venv toolsenv
     source toolsenv/bin/activate
     pip install -r requirements.txt
-    pip install -I .
+    # if you plan to make changes to tornettools, you can add the '--editable' pip install flag
+    # to avoid the need to re-run 'pip install' after every modification:
+    # https://pip.pypa.io/en/stable/topics/local-project-installs/#editable-installs
+    pip install --ignore-installed .
 
 ### read the help menus
 
@@ -88,8 +91,15 @@ Here is a bibtex entry for latex users:
     cd tor
     ./autogen.sh
     ./configure --disable-asciidoc --disable-unittests --disable-manpage --disable-html-manual
-    make
+    make -j$(nproc)
     cd ..
+
+### install additional executables used by tornettools
+
+`tornettools` also uses the `faketime`, `dstat`, `free`, and `xz` command-line
+tools. On Ubuntu these can be installed with:
+
+    sudo apt-get install faketime dstat procps xz-utils
 
 ### in order to generate, we need a tor and tor-gencert binaries (to generate relay keys)
 
@@ -101,17 +111,19 @@ Here is a bibtex entry for latex users:
         consensuses-2020-11 \
         server-descriptors-2020-11 \
         userstats-relay-country.csv \
+        tmodel-ccs2018.github.io \
         --onionperf_data_path onionperf-2020-11 \
         --bandwidth_data_path bandwidth-2020-11.csv \
         --geoip_path tor/src/config/geoip
 
 ### now we can used the staged files to generate many times
 
-For example, use '--network_scale 0.01' to generate a private Tor network at '1%' the scale of public Tor:
+For example, use `--network_scale 0.01` to generate a private Tor network at '1%' the scale of public Tor:
 
     tornettools generate \
-        relayinfo_staging_2020-11-01--2020-12-01.json \
-        userinfo_staging_2020-11-01--2020-12-01.json \
+        relayinfo_staging_2020-11-01--2020-11-30.json \
+        userinfo_staging_2020-11-01--2020-11-30.json \
+        networkinfo_staging.gml \
         tmodel-ccs2018.github.io \
         --network_scale 0.01 \
         --prefix tornet-0.01
